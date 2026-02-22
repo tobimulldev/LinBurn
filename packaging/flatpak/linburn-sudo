@@ -1,0 +1,63 @@
+#!/bin/bash
+# LinBurn privilege bridge
+# Called by check_root() in main.py when not running as root.
+#
+# KEY INSIGHT: DISPLAY/XAUTHORITY inside the flatpak sandbox are sandbox-specific
+# proxies that root on the host cannot use. We must use flatpak-spawn --host
+# so that bash runs with the REAL host environment (including the real XAUTHORITY).
+
+exec flatpak-spawn --host bash -c '
+    LOG=/tmp/linburn-launch.log
+    echo "=== LinBurn Launch $(date) ===" > "$LOG"
+    echo "HOST DISPLAY=${DISPLAY}"         >> "$LOG"
+    echo "HOST XAUTHORITY=${XAUTHORITY}"   >> "$LOG"
+    echo "HOST XDG=${XDG_RUNTIME_DIR}"     >> "$LOG"
+
+    # --- Find app files on host ---
+    APP_HOST=""
+    for base in \
+        "$HOME/.local/share/flatpak/app/io.github.linburn.LinBurn" \
+        "/var/lib/flatpak/app/io.github.linburn.LinBurn"
+    do
+        for candidate in "$base"/*/master/active/files \
+                         "$base"/*/stable/active/files; do
+            [ -d "$candidate/lib/linburn" ] && APP_HOST="$candidate" && break 2
+        done
+    done
+
+    if [ -z "$APP_HOST" ]; then
+        echo "ERROR: App path not found on host" >> "$LOG"
+        zenity --error --title="LinBurn" \
+            --text="App-Pfad auf dem Host nicht gefunden.\nBitte flatpak erneut installieren." \
+            2>/dev/null || notify-send "LinBurn" "App-Pfad nicht gefunden" 2>/dev/null
+        exit 1
+    fi
+
+    echo "APP_HOST=${APP_HOST}" >> "$LOG"
+    PYPATH="${APP_HOST}/lib/python3.12/site-packages"
+    echo "PYPATH=${PYPATH}" >> "$LOG"
+
+    # --- Run as root via pkexec ---
+    # Host DISPLAY/XAUTHORITY are used directly (inherited from host environment).
+    pkexec /usr/bin/env \
+        "DISPLAY=${DISPLAY}" \
+        "XAUTHORITY=${XAUTHORITY}" \
+        "XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}" \
+        "PYTHONPATH=${PYPATH}" \
+        "QT_QPA_PLATFORM=xcb" \
+        /usr/bin/python3 \
+        "${APP_HOST}/lib/linburn/main.py" \
+        >> "$LOG" 2>&1
+
+    EXIT_CODE=$?
+    echo "Exit code: ${EXIT_CODE}" >> "$LOG"
+
+    # Only show error dialog for genuine startup failures (not normal close)
+    # Exit 0 = clean exit, Exit 143 = SIGTERM (killed), Exit 130 = Ctrl+C
+    if [ "${EXIT_CODE}" -ne 0 ] && [ "${EXIT_CODE}" -ne 143 ] && [ "${EXIT_CODE}" -ne 130 ]; then
+        ERR=$(tail -10 "$LOG")
+        zenity --error --title="LinBurn Startfehler" \
+            --text="LinBurn konnte nicht gestartet werden (Code ${EXIT_CODE}).\n\n${ERR}\n\nVollständiges Log: /tmp/linburn-launch.log" \
+            2>/dev/null
+    fi
+'

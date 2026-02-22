@@ -1,0 +1,61 @@
+app-id: io.github.linburn.LinBurn
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: linburn
+
+finish-args:
+  # Display
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # USB/block device access
+  - --device=all
+  - --filesystem=host
+  # UDisks2 for device monitoring
+  - --system-talk-name=org.freedesktop.UDisks2
+  # Root elevation via pkexec (on host via flatpak-spawn)
+  - --talk-name=org.freedesktop.PolicyKit1
+  - --talk-name=org.freedesktop.Flatpak
+
+modules:
+  - name: python-deps
+    buildsystem: simple
+    build-options:
+      env:
+        PIP_PREFIX: /app
+        PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    build-commands:
+      - pip3 install --no-index --find-links=.
+          pyudev-0.24.4-py3-none-any.whl
+          pyqt6_sip-13.11.0-cp312-cp312-manylinux1_x86_64.manylinux_2_5_x86_64.whl
+          pyqt6_qt6-6.10.2-py3-none-manylinux_2_34_x86_64.whl
+          pyqt6-6.10.2-cp39-abi3-manylinux_2_34_x86_64.whl
+    sources:
+      - type: file
+        url: https://files.pythonhosted.org/packages/2a/51/3dc0cd6498b24dea3cdeaed648568e3ca7454d41334d840b114156d7479f/pyudev-0.24.4-py3-none-any.whl
+        sha256: b3b6b01c68e6fc628428cc45ff3fe6c277afbb5d96507f14473ddb4a6b959e00
+      - type: file
+        url: https://files.pythonhosted.org/packages/66/e6/25dc20a03c46000e8b93aaf79347227926b67959283e5aab797daa7f64d8/pyqt6_sip-13.11.0-cp312-cp312-manylinux1_x86_64.manylinux_2_5_x86_64.whl
+        sha256: c30248d9bbe54c46a78e5d549da50295ecd6584b965597f751e272f000fb8527
+      - type: file
+        url: https://files.pythonhosted.org/packages/d5/fe/01fd9b9d2ca139ef61582f2e2da249fa169229144294c1bb27db59ad8420/pyqt6_qt6-6.10.2-py3-none-manylinux_2_34_x86_64.whl
+        sha256: 19c10b5f0806e9f9bac2c9759bd5d7d19a78967f330fd60a2db409177fa76e49
+      - type: file
+        url: https://files.pythonhosted.org/packages/ec/3e/9a015651ec71cea2e2f960c37edeb21623ba96a74956c0827def837f7c6b/pyqt6-6.10.2-cp39-abi3-manylinux_2_34_x86_64.whl
+        sha256: 78e1b3d5763e4cbc84485aef600e0aba5e1932fd263b716f92cd1a40dfa5e924
+
+  - name: linburn
+    buildsystem: simple
+    sources:
+      - type: dir
+        path: ../..
+    build-commands:
+      - install -d /app/lib/linburn
+      - cp -r main.py core gui requirements.txt /app/lib/linburn/
+      - install -Dm755 packaging/flatpak/linburn.sh /app/bin/linburn
+      - install -Dm755 packaging/flatpak/linburn-sudo /app/bin/sudo
+      - install -Dm644 packaging/flatpak/io.github.linburn.LinBurn.desktop
+          /app/share/applications/io.github.linburn.LinBurn.desktop
+      - install -Dm644 packaging/flatpak/io.github.linburn.LinBurn.png
+          /app/share/icons/hicolor/256x256/apps/io.github.linburn.LinBurn.png

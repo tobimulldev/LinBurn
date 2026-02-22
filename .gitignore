@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Flatpak build artifacts
+build-flatpak/
+flatpak-build-dir/
+linburn-repo/
+.flatpak-builder/
+
+# Downloaded wheel files (fetched automatically by flatpak-builder)
+packaging/flatpak/*.whl
+
+# Built packages
+*.deb
+*.flatpak
+*.rpm
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code session
+.claude/
+
+# Logs
+*.log
+/tmp/
