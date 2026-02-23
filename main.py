@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-LinBurn für Linux
-Erstellt bootbare USB-Sticks aus ISO-Abbildern.
+LinBurn – Erstellt bootbare USB-Sticks aus ISO-Abbildern (Linux).
 
 Verwendung:
     sudo python3 main.py
@@ -18,14 +17,7 @@ import sys
 
 
 def check_root():
-    """Ensure the program runs with administrator / root privileges."""
-    if sys.platform == "win32":
-        _check_admin_windows()
-    else:
-        _check_root_linux()
-
-
-def _check_root_linux():
+    """Ensure the program runs with root privileges."""
     if os.geteuid() != 0:
         print("Fehler: LinBurn muss als root (sudo) ausgeführt werden.")
         print("Starte neu mit sudo...")
@@ -34,30 +26,8 @@ def _check_root_linux():
         sys.exit(1)
 
 
-def _check_admin_windows():
-    import ctypes
-    try:
-        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        is_admin = False
-
-    if not is_admin:
-        # Re-launch with UAC elevation prompt
-        try:
-            params = " ".join(f'"{a}"' for a in sys.argv)
-            ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", sys.executable, params, None, 1
-            )
-        except Exception as e:
-            print(f"Fehler beim Starten mit Admin-Rechten: {e}")
-        sys.exit(0)
-
-
 def check_dependencies():
-    """Check for required system tools (Linux only)."""
-    if sys.platform == "win32":
-        return  # All Windows tools are built-in (diskpart, format, DISM, etc.)
-
+    """Check for required system tools."""
     import shutil
     required = {
         "parted": "parted",
@@ -84,19 +54,15 @@ def check_dependencies():
 def main():
     check_root()
 
-    # Import Qt only after root check to avoid display issues
     from PyQt6.QtWidgets import QApplication
-    from PyQt6.QtGui import QIcon
     from PyQt6.QtCore import Qt
 
     check_dependencies()
 
     app = QApplication(sys.argv)
     app.setApplicationName("LinBurn")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("1.1.0")
     app.setOrganizationName("LinBurn")
-
-    # Set application style
     app.setStyle("Fusion")
 
     from gui.main_window import MainWindow

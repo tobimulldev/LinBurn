@@ -463,27 +463,25 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _browse_iso(self):
-        import sys
+        import pwd
         start_dir = os.path.expanduser("~")
-        if sys.platform != "win32":
-            # On Linux running as root, find the real user's home directory
-            import pwd
-            sudo_user = os.environ.get("SUDO_USER")
-            pkexec_uid = os.environ.get("PKEXEC_UID")
-            if sudo_user:
-                try:
-                    start_dir = pwd.getpwnam(sudo_user).pw_dir
-                except KeyError:
-                    pass
-            elif pkexec_uid:
-                try:
-                    start_dir = pwd.getpwuid(int(pkexec_uid)).pw_dir
-                except (KeyError, ValueError):
-                    pass
-            elif os.geteuid() != 0:
-                start_dir = os.path.expanduser("~")
-            else:
-                start_dir = "/"
+        # On Linux running as root, find the real user's home directory
+        sudo_user = os.environ.get("SUDO_USER")
+        pkexec_uid = os.environ.get("PKEXEC_UID")
+        if sudo_user:
+            try:
+                start_dir = pwd.getpwnam(sudo_user).pw_dir
+            except KeyError:
+                pass
+        elif pkexec_uid:
+            try:
+                start_dir = pwd.getpwuid(int(pkexec_uid)).pw_dir
+            except (KeyError, ValueError):
+                pass
+        elif os.geteuid() != 0:
+            start_dir = os.path.expanduser("~")
+        else:
+            start_dir = "/"
 
         path, _ = QFileDialog.getOpenFileName(
             self,

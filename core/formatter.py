@@ -1,13 +1,10 @@
 """
-USB drive partitioning and formatting.
-Supports MBR/GPT partition schemes and FAT32/NTFS/exFAT/ext4 filesystems.
-Linux:   parted + mkfs.*
-Windows: diskpart (via core.platform.windows helpers)
+USB drive partitioning and formatting (Linux).
+Uses parted + mkfs.*.
 """
 import os
 import signal
 import subprocess
-import sys
 import threading
 import time
 from typing import Optional
@@ -16,12 +13,6 @@ from typing import Optional
 def _run(cmd, timeout=15, capture=False):
     """
     Run a command with a hard wall-clock timeout.
-
-    Uses a daemon thread so that even D-state (uninterruptible I/O) processes
-    cannot block the caller: we join the thread for at most `timeout` seconds,
-    then kill the process group and return immediately without waiting for the
-    (potentially unkillable) process to exit.
-
     Returns (returncode, stdout, stderr).
     """
     kwargs: dict = {"start_new_session": True}
@@ -54,19 +45,13 @@ def _run(cmd, timeout=15, capture=False):
     t.join(timeout=timeout)
 
     if t.is_alive():
-        # Timed out — kill entire process group (best-effort; D-state may survive)
         try:
-            if sys.platform != "win32":
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            else:
-                proc.kill()
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, OSError):
             try:
                 proc.kill()
             except Exception:
                 pass
-        # Do NOT join the thread — it may be stuck in kernel D-state forever.
-        # It is a daemon thread so it won't block program exit.
         return -1, "", ""
 
     return result["rc"] if result["rc"] is not None else -1, result["out"], result["err"]
@@ -105,11 +90,6 @@ class Formatter:
             if log_callback:
                 log_callback(msg)
 
-        if sys.platform == "win32":
-            return cls._format_device_windows(
-                device_path, scheme, filesystem, label, quick_format, log
-            )
-
         log(f"Lösche bestehende Signaturen auf {device_path}...")
         cls._wipe_device(device_path)
         time.sleep(1.0)
@@ -118,16 +98,14 @@ class Formatter:
         cls._create_partition_table(device_path, scheme)
         time.sleep(1.0)
 
-        log(f"Erstelle Partition...")
+        log("Erstelle Partition...")
         cls._create_partition(device_path, scheme, filesystem)
         time.sleep(1.5)
 
-        # Force kernel to re-read partition table
         _run(["partprobe", device_path], timeout=10)
         _run(["blockdev", "--rereadpt", device_path], timeout=10)
         _run(["udevadm", "settle", "--timeout=5"], timeout=8)
 
-        # Retry up to 10 seconds for the partition node to appear
         partition = None
         for _ in range(20):
             partition = cls._get_first_partition(device_path)
@@ -159,17 +137,13 @@ class Formatter:
     ) -> tuple:
         """
         Create Windows UEFI-optimised dual-partition layout on GPT:
-          Partition 1: 300 MiB  FAT32  (EFI System Partition – UEFI can always read this)
-          Partition 2: rest      NTFS   (Windows installation files, supports >4 GB install.wim)
-
+          Partition 1: 300 MiB  FAT32  (EFI System Partition)
+          Partition 2: rest      NTFS   (Windows installation files)
         Returns (efi_partition_path, data_partition_path).
         """
         def log(msg):
             if log_callback:
                 log_callback(msg)
-
-        if sys.platform == "win32":
-            return cls._format_device_dual_windows(device_path, label, quick_format, log)
 
         log(f"Lösche bestehende Signaturen auf {device_path}...")
         cls._wipe_device(device_path)
@@ -193,12 +167,10 @@ class Formatter:
         _run(["parted", "-s", device_path, "mkpart", "Windows", "ntfs", "301MiB", "100%"], timeout=20)
         time.sleep(1.5)
 
-        # Let kernel re-read partition table
         _run(["partprobe", device_path], timeout=10)
         _run(["blockdev", "--rereadpt", device_path], timeout=10)
         _run(["udevadm", "settle", "--timeout=5"], timeout=8)
 
-        # Wait for both partition nodes
         efi_part = None
         data_part = None
         for _ in range(20):
@@ -234,7 +206,6 @@ class Formatter:
 
     @classmethod
     def _get_nth_partition(cls, device_path: str, n: int) -> Optional[str]:
-        """Return path of the nth partition (1-based) using lsblk."""
         try:
             result = subprocess.run(
                 ["lsblk", "-rno", "NAME,TYPE", device_path],
@@ -249,7 +220,6 @@ class Formatter:
                 return parts[n - 1]
         except Exception:
             pass
-        # Fallback: guess common naming
         base = device_path.rstrip("0123456789")
         sep = "p" if device_path[-1].isdigit() else ""
         candidate = f"{base}{sep}{n}"
@@ -257,9 +227,7 @@ class Formatter:
 
     @classmethod
     def _wipe_device(cls, device_path: str):
-        """Wipe existing partition table signatures so parted can take over."""
         _run(["wipefs", "-a", "-f", device_path], timeout=10)
-        # Zero out first 1 MiB — no conv=fsync to avoid blocking on busy devices
         _run(["dd", "if=/dev/zero", f"of={device_path}", "bs=512", "count=2048"], timeout=10)
 
     @classmethod
@@ -278,11 +246,10 @@ class Formatter:
 
     @classmethod
     def _create_partition(cls, device_path: str, scheme: str, filesystem: str):
-        # Map filesystem to parted fs-type
         parted_fs = {
             "FAT32": "fat32",
             "NTFS": "ntfs",
-            "exFAT": "fat32",  # parted doesn't know exfat, use fat32 type
+            "exFAT": "fat32",
             "ext4": "ext4",
         }.get(filesystem, "fat32")
 
@@ -295,16 +262,11 @@ class Formatter:
         if rc != 0:
             raise FormatterError(f"Partition erstellen fehlgeschlagen: {stderr}")
 
-        # Set boot flag for MBR
         if scheme == "MBR":
             _run(["parted", "-s", device_path, "set", "1", "boot", "on"], timeout=10)
 
     @classmethod
     def _get_first_partition(cls, device_path: str) -> Optional[str]:
-        """Return path of first partition on device."""
-        base = os.path.basename(device_path)
-
-        # 1. Common naming patterns: sdX1, mmcblk0p1, nvme0n1p1
         candidates = [
             f"{device_path}1",
             f"{device_path}p1",
@@ -313,7 +275,6 @@ class Formatter:
             if os.path.exists(candidate):
                 return candidate
 
-        # 2. Ask lsblk directly (most reliable)
         try:
             result = subprocess.run(
                 ["lsblk", "-rno", "NAME,TYPE", device_path],
@@ -328,8 +289,8 @@ class Formatter:
         except Exception:
             pass
 
-        # 3. Fallback: scan /proc/partitions
         try:
+            base = os.path.basename(device_path)
             with open("/proc/partitions") as f:
                 for line in f:
                     parts = line.split()
@@ -389,62 +350,3 @@ class Formatter:
             raise FormatterError(
                 f"Formatierung fehlgeschlagen ({filesystem}): {stderr.strip()}"
             )
-
-    # ------------------------------------------------------------------
-    # Windows implementations
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def _format_device_windows(
-        cls,
-        device_path: str,
-        scheme: str,
-        filesystem: str,
-        label: str,
-        quick_format: bool,
-        log,
-    ) -> str:
-        """Windows: partition + format via diskpart. Returns drive letter e.g. 'E:'."""
-        from core.platform.windows import get_disk_number, create_single_partition_win
-
-        disk_num = get_disk_number(device_path)
-        if disk_num is None:
-            raise FormatterError(f"Ungültiger Gerätepfad: {device_path}")
-
-        log(f"Formatiere Disk {disk_num} ({scheme}, {filesystem})...")
-        drive_letter = create_single_partition_win(
-            disk_num, scheme, filesystem, label, quick_format
-        )
-        if not drive_letter:
-            raise FormatterError(
-                "Formatierung fehlgeschlagen — kein Laufwerksbuchstabe zugewiesen."
-            )
-
-        log(f"Formatierung abgeschlossen: {drive_letter}")
-        return drive_letter
-
-    @classmethod
-    def _format_device_dual_windows(
-        cls,
-        device_path: str,
-        label: str,
-        quick_format: bool,
-        log,
-    ) -> tuple:
-        """Windows: GPT dual-partition (EFI + NTFS) via diskpart. Returns (efi_letter, data_letter)."""
-        from core.platform.windows import get_disk_number, create_dual_partition_win
-
-        disk_num = get_disk_number(device_path)
-        if disk_num is None:
-            raise FormatterError(f"Ungültiger Gerätepfad: {device_path}")
-
-        log(f"Erstelle GPT Dual-Partition auf Disk {disk_num}...")
-        efi_letter, data_letter = create_dual_partition_win(disk_num, label, quick_format)
-
-        if not efi_letter or not data_letter:
-            raise FormatterError(
-                "Dual-Partition fehlgeschlagen — nicht alle Laufwerksbuchstaben zugewiesen."
-            )
-
-        log(f"Dual-Partition fertig: EFI={efi_letter}, Daten={data_letter}")
-        return efi_letter, data_letter
