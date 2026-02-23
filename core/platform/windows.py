@@ -174,6 +174,9 @@ def create_single_partition_win(
     label_safe = (label[:11] if filesystem == "FAT32" else label[:32]).replace('"', '')
     q = "quick " if quick else ""
 
+    # Find a free drive letter to assign explicitly (avoids locale-dependent parsing)
+    free_letter = _find_free_drive_letter()
+
     cmds = [f"select disk {disk_num}", "clean"]
     if scheme == "GPT":
         cmds.append("convert gpt")
@@ -185,18 +188,28 @@ def create_single_partition_win(
         cmds.append("active")
     cmds += [
         f'format fs={win_fs} label="{label_safe}" {q}override',
-        "assign",
     ]
+    if free_letter:
+        cmds.append(f"assign letter={free_letter}")
+    else:
+        cmds.append("assign")
 
-    rc, out = run_diskpart(cmds, timeout=180)
+    run_diskpart(cmds, timeout=300)
 
-    # Parse "DiskPart successfully assigned the drive letter or mount point."
-    m = re.search(r"assigned the drive letter\s+([A-Za-z])", out, re.IGNORECASE)
-    if m:
-        return m.group(1).upper() + ":"
-    # Fallback: query PowerShell
-    time.sleep(1)
-    return _query_last_partition_letter(disk_num)
+    # Give Windows time to register the new volume (slow USB drives need this)
+    time.sleep(3)
+
+    # Try to find the assigned letter with retries (Windows is async about this)
+    for _ in range(10):
+        letter = _query_last_partition_letter(disk_num)
+        if letter:
+            return letter
+        time.sleep(1)
+
+    # Last resort: if we explicitly assigned a letter, trust it
+    if free_letter:
+        return free_letter + ":"
+    return None
 
 
 def create_dual_partition_win(
@@ -213,31 +226,66 @@ def create_dual_partition_win(
     label_safe = label[:32].replace('"', '')
     q = "quick " if quick else ""
 
+    # Find two free drive letters to assign explicitly
+    used: set = set()
+    script = "Get-PSDrive -PSProvider FileSystem | Select-Object -ExpandProperty Name"
+    rc, out, _ = run_powershell(script, timeout=10)
+    if rc == 0:
+        used = {line.strip().upper() for line in out.splitlines() if line.strip()}
+    free = [l for l in "DEFGHIJKLMNOPQRSTUVWXYZ" if l not in used]
+    efi_letter = free[0] if len(free) >= 1 else None
+    data_letter = free[1] if len(free) >= 2 else None
+
     cmds = [
         f"select disk {disk_num}", "clean", "convert gpt",
         "create partition efi size=300",
         'format fs=fat32 label="EFI" quick override',
-        "assign",
+    ]
+    if efi_letter:
+        cmds.append(f"assign letter={efi_letter}")
+    else:
+        cmds.append("assign")
+    cmds += [
         "create partition primary",
         f'format fs=ntfs label="{label_safe}" {q}override',
-        "assign",
     ]
-    rc, out = run_diskpart(cmds, timeout=300)
+    if data_letter:
+        cmds.append(f"assign letter={data_letter}")
+    else:
+        cmds.append("assign")
 
-    letters = re.findall(r"assigned the drive letter\s+([A-Za-z])", out, re.IGNORECASE)
-    efi = (letters[0].upper() + ":") if len(letters) >= 1 else None
-    data = (letters[1].upper() + ":") if len(letters) >= 2 else None
+    run_diskpart(cmds, timeout=300)
 
-    if not efi or not data:
-        time.sleep(1)
+    # Give Windows time to register the new volumes
+    time.sleep(3)
+
+    # Verify with retries
+    for _ in range(10):
         all_letters = _query_all_partition_letters(disk_num)
         if len(all_letters) >= 2:
-            efi = all_letters[0]
-            data = all_letters[1]
-        elif len(all_letters) == 1:
-            data = all_letters[0]
+            return all_letters[0], all_letters[1]
+        time.sleep(1)
 
-    return efi, data
+    # Fall back to explicitly assigned letters if query still fails
+    if efi_letter and data_letter:
+        return efi_letter + ":", data_letter + ":"
+    return None, None
+
+
+def _find_free_drive_letter() -> Optional[str]:
+    """Return the first unused drive letter (D..Z) available for assignment."""
+    script = (
+        "Get-PSDrive -PSProvider FileSystem | "
+        "Select-Object -ExpandProperty Name"
+    )
+    rc, out, _ = run_powershell(script, timeout=10)
+    used = set()
+    if rc == 0:
+        used = {line.strip().upper() for line in out.splitlines() if line.strip()}
+    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
+        if letter not in used:
+            return letter
+    return None
 
 
 def _query_last_partition_letter(disk_num: int) -> Optional[str]:
