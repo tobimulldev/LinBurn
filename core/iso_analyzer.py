@@ -193,7 +193,10 @@ class IsoAnalyzer:
     @classmethod
     def _is_windows11(cls, mount_point: str) -> bool:
         """Detect Windows 11 by checking WIM metadata."""
-        # Check for win11 marker
+        if sys.platform == "win32":
+            return cls._is_windows11_win(mount_point)
+
+        # Linux: wiminfo from wimtools package
         try:
             result = subprocess.run(
                 ["wiminfo", os.path.join(mount_point, "sources", "install.wim")],
@@ -204,22 +207,7 @@ class IsoAnalyzer:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-        # Check setup.exe version as fallback (Windows 11 setup is version 10.0.22xxx)
-        setup = os.path.join(mount_point, "setup.exe")
-        if os.path.exists(setup):
-            try:
-                result = subprocess.run(
-                    ["exiftool", "-FileVersion", setup],
-                    capture_output=True, text=True, timeout=5
-                )
-                version_line = result.stdout.strip()
-                # Windows 11 build >= 22000
-                if "22" in version_line:
-                    return True
-            except FileNotFoundError:
-                pass
-
-        # Heuristic: check MediaCreationTool or ProductVersion in media
+        # Linux fallback: MediaMeta.xml
         media_info = os.path.join(mount_point, "MediaMeta.xml")
         if os.path.exists(media_info):
             try:
@@ -231,6 +219,76 @@ class IsoAnalyzer:
                 pass
 
         return False
+
+    @classmethod
+    def _is_windows11_win(cls, mount_letter: str) -> bool:
+        """Detect Windows 11 on Windows using DISM + PE version fallback."""
+        from core.platform.windows import _NO_WINDOW
+
+        # Method 1: DISM /get-wiminfo (always available on Windows 10/11)
+        for wim_name in ("install.wim", "install.esd"):
+            wim = os.path.join(mount_letter, "sources", wim_name)
+            if os.path.exists(wim):
+                try:
+                    r = subprocess.run(
+                        ["dism", "/get-wiminfo", f"/wimfile:{wim}"],
+                        capture_output=True, text=True, timeout=30,
+                        creationflags=_NO_WINDOW,
+                    )
+                    if "windows 11" in r.stdout.lower():
+                        return True
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    pass
+                break  # found the wim file, no need to check esd too
+
+        # Method 2: Read setup.exe PE version via ctypes
+        # Windows 11 build number >= 22000
+        setup = os.path.join(mount_letter, "setup.exe")
+        if os.path.exists(setup):
+            try:
+                build = cls._get_pe_build_win(setup)
+                if build is not None and build >= 22000:
+                    return True
+            except Exception:
+                pass
+
+        # Method 3: MediaMeta.xml text heuristic
+        media_meta = os.path.join(mount_letter, "MediaMeta.xml")
+        if os.path.exists(media_meta):
+            try:
+                with open(media_meta, "r", errors="replace") as f:
+                    content = f.read().lower()
+                if "windows 11" in content or "22000" in content:
+                    return True
+            except OSError:
+                pass
+
+        return False
+
+    @staticmethod
+    def _get_pe_build_win(exe_path: str):
+        """Return the build number from a PE file's VS_FIXEDFILEINFO (Windows only)."""
+        import ctypes
+        import ctypes.wintypes
+
+        ver = ctypes.windll.version
+        size = ver.GetFileVersionInfoSizeW(exe_path, None)
+        if not size:
+            return None
+
+        buf = ctypes.create_string_buffer(size)
+        if not ver.GetFileVersionInfoW(exe_path, 0, size, buf):
+            return None
+
+        lp = ctypes.c_void_p()
+        n = ctypes.c_uint()
+        if not ver.VerQueryValueW(buf, "\\", ctypes.byref(lp), ctypes.byref(n)):
+            return None
+
+        # VS_FIXEDFILEINFO: dwFileVersionLS at offset 12
+        # build number = high word of LS (e.g. 22000 for Win11)
+        ls = ctypes.c_uint32.from_address(lp.value + 12).value
+        return ls >> 16
 
     @classmethod
     def _set_recommendations(cls, info: IsoInfo):
