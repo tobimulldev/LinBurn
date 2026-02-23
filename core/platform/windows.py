@@ -18,6 +18,11 @@ import tempfile
 import time
 from typing import Optional, Tuple
 
+# Prevent console windows from flashing when spawning subprocesses
+# (LinBurn.exe is built with console=False, so any child process would
+#  open its own console window without this flag)
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
 
 # ---------------------------------------------------------------------------
 # PowerShell helper
@@ -29,6 +34,7 @@ def run_powershell(script: str, timeout: int = 30) -> Tuple[int, str, str]:
         result = subprocess.run(
             ["powershell", "-NonInteractive", "-NoProfile", "-Command", script],
             capture_output=True, text=True, timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
         return result.returncode, result.stdout.strip(), result.stderr.strip()
     except FileNotFoundError:
@@ -51,6 +57,7 @@ def run_diskpart(commands: list, timeout: int = 60) -> Tuple[int, str]:
         result = subprocess.run(
             ["diskpart", "/s", tmp.name],
             capture_output=True, text=True, timeout=timeout,
+            creationflags=_NO_WINDOW,
         )
         return result.returncode, result.stdout
     except FileNotFoundError:
@@ -333,6 +340,7 @@ def split_wim_win(src_wim: str, dst_swm: str, max_size_mb: int = 3800) -> bool:
                 f"/FileSize:{max_size_mb}",
             ],
             capture_output=True, text=True, timeout=1200,
+            creationflags=_NO_WINDOW,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -356,6 +364,7 @@ def patch_boot_wim_win(boot_wim: str, log) -> bool:
             ["dism", f"/Mount-Image", f"/ImageFile:{boot_wim}",
              "/Index:2", f"/MountDir:{tmp_mount}"],
             capture_output=True, text=True, timeout=120,
+            creationflags=_NO_WINDOW,
         )
         if r1.returncode != 0:
             log(f"Warnung: DISM Mount fehlgeschlagen: {r1.stderr.strip()[:200]}")
@@ -377,6 +386,7 @@ def patch_boot_wim_win(boot_wim: str, log) -> bool:
         r2 = subprocess.run(
             ["dism", f"/Unmount-Image", f"/MountDir:{tmp_mount}", "/Commit"],
             capture_output=True, text=True, timeout=120,
+            creationflags=_NO_WINDOW,
         )
         if r2.returncode == 0:
             log("boot.wim gepatcht: appraiserres.dll in WinPE deaktiviert.")
@@ -387,6 +397,7 @@ def patch_boot_wim_win(boot_wim: str, log) -> bool:
             subprocess.run(
                 ["dism", f"/Unmount-Image", f"/MountDir:{tmp_mount}", "/Discard"],
                 capture_output=True, timeout=60,
+                creationflags=_NO_WINDOW,
             )
             return False
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
@@ -421,6 +432,7 @@ def install_bios_bootloader_win(drive_letter: str, log) -> bool:
                 r = subprocess.run(
                     [bootsect, "/nt60", drive_letter, "/mbr"],
                     capture_output=True, text=True, timeout=30,
+                    creationflags=_NO_WINDOW,
                 )
                 if r.returncode == 0:
                     log(f"BIOS-Bootloader (bootsect) installiert auf {drive_letter}.")
@@ -454,6 +466,7 @@ def check_bad_blocks_win(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            creationflags=_NO_WINDOW,
         )
     except FileNotFoundError:
         log_callback("chkdsk nicht gefunden.")
