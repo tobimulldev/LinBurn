@@ -54,9 +54,11 @@ def _check_admin_windows():
 
 
 def check_dependencies():
-    """Check for required system tools."""
+    """Check for required system tools (Linux only)."""
+    if sys.platform == "win32":
+        return  # All Windows tools are built-in (diskpart, format, DISM, etc.)
+
     import shutil
-    missing = []
     required = {
         "parted": "parted",
         "mkfs.fat": "dosfstools",
@@ -73,9 +75,9 @@ def check_dependencies():
         print("Warnung: Folgende optionale Tools fehlen:")
         for w in warnings:
             print(w)
-        print("Installieren mit: sudo apt install " +
-              " ".join(set(required[k.split()[0]] for k in warnings
-                           if k.split()[0] in required)))
+        missing_pkgs = " ".join(sorted({pkg for cmd, pkg in required.items()
+                                        if not shutil.which(cmd)}))
+        print(f"Installieren mit: sudo apt install {missing_pkgs}")
         print()
 
 

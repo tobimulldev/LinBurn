@@ -269,19 +269,26 @@ def mount_iso_win(iso_path: str) -> Optional[str]:
     Mount an ISO using PowerShell Mount-DiskImage (Windows 8+).
     Returns the drive letter with trailing backslash (e.g. 'E:\\') or None.
     """
+    # Qt returns paths with forward slashes on Windows; normalize to backslashes
+    iso_path = os.path.normpath(iso_path)
+    # Mount first, then query the assigned drive letter separately (more reliable)
     script = (
-        f'(Mount-DiskImage -ImagePath "{iso_path}" -PassThru | '
-        f'Get-Volume).DriveLetter'
+        f'Mount-DiskImage -ImagePath "{iso_path}" -ErrorAction SilentlyContinue | Out-Null; '
+        f'$v = Get-DiskImage -ImagePath "{iso_path}" -ErrorAction SilentlyContinue | '
+        f'Get-Volume -ErrorAction SilentlyContinue; '
+        f'if ($v) {{ $v.DriveLetter }}'
     )
     rc, out, _ = run_powershell(script, timeout=30)
     if rc == 0 and out.strip():
-        letter = out.strip().split()[-1].upper()  # last non-empty line
-        return letter + ":\\"
+        letter = out.strip().split()[-1].upper()
+        if len(letter) == 1 and letter.isalpha():
+            return letter + ":\\"
     return None
 
 
 def unmount_iso_win(iso_path: str):
     """Unmount a previously mounted ISO image."""
+    iso_path = os.path.normpath(iso_path)
     script = f'Dismount-DiskImage -ImagePath "{iso_path}" -ErrorAction SilentlyContinue'
     run_powershell(script, timeout=15)
 

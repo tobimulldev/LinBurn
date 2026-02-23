@@ -169,9 +169,11 @@ class IsoAnalyzer:
     def _check_contents_windows(cls, path: str, info: IsoInfo):
         """Windows: mount ISO via Mount-DiskImage and inspect contents."""
         from core.platform.windows import inspect_iso_contents_win, unmount_iso_win
+        mounted = False
         try:
             result = inspect_iso_contents_win(path)
             mount_letter = result.get("mount_letter")
+            mounted = mount_letter is not None
 
             if result.get("has_efi"):
                 info.has_uefi = True
@@ -184,11 +186,32 @@ class IsoAnalyzer:
                 info.is_bootable = True
                 if mount_letter:
                     info.is_windows11 = cls._is_windows11(mount_letter)
+        except Exception:
+            pass  # mounting failed; fall back to direct ISO reading below
         finally:
-            try:
-                unmount_iso_win(path)
-            except Exception:
-                pass
+            if mounted:
+                try:
+                    unmount_iso_win(path)
+                except Exception:
+                    pass
+
+        # ── Fallback: read ISO 9660 directory without mounting ──────────────
+        # Covers the case where Mount-DiskImage failed (e.g. path with spaces,
+        # insufficient rights, or ISO already mounted).
+        if not info.is_windows:
+            for wim_rel in ("sources/install.wim", "sources/install.esd"):
+                if cls._iso_find_file(path, wim_rel) is not None:
+                    info.is_windows = True
+                    info.is_bootable = True
+                    break
+            if info.is_windows:
+                if (cls._iso_find_file(path, "efi") is not None or
+                        cls._iso_find_file(path, "EFI") is not None):
+                    info.has_uefi = True
+
+        # ── Win11 detection fallback: parse WIM XML directly from ISO ───────
+        if info.is_windows and not info.is_windows11:
+            info.is_windows11 = cls._detect_win11_from_iso_direct(path)
 
     @classmethod
     def _is_windows11(cls, mount_point: str) -> bool:
@@ -289,6 +312,105 @@ class IsoAnalyzer:
         # build number = high word of LS (e.g. 22000 for Win11)
         ls = ctypes.c_uint32.from_address(lp.value + 12).value
         return ls >> 16
+
+    # ── Pure-Python ISO 9660 helpers ─────────────────────────────────────────
+
+    @classmethod
+    def _iso_find_file(cls, iso_path: str, rel_path: str):
+        """
+        Locate a file inside an ISO 9660 image without mounting.
+        rel_path: forward-slash separated, case-insensitive (e.g. "sources/install.wim")
+        Returns (byte_offset, size) tuple or None if not found.
+        """
+        SECTOR = 2048
+        parts = [p.upper().encode("ascii") for p in rel_path.split("/")]
+        try:
+            with open(iso_path, "rb") as f:
+                # Primary Volume Descriptor at sector 16
+                f.seek(16 * SECTOR)
+                pvd = f.read(SECTOR)
+                if len(pvd) < 190 or pvd[1:6] != b"CD001":
+                    return None
+
+                # Root directory: sector at PVD[158:162], size at PVD[166:170]
+                dir_sector = int.from_bytes(pvd[158:162], "little")
+                dir_size   = int.from_bytes(pvd[166:170], "little")
+
+                for i, target in enumerate(parts):
+                    f.seek(dir_sector * SECTOR)
+                    dir_data = f.read(dir_size)
+                    found = False
+                    pos = 0
+                    while pos < len(dir_data):
+                        dr_len = dir_data[pos]
+                        if dr_len == 0:
+                            # Padding to next sector boundary
+                            pos = ((pos // SECTOR) + 1) * SECTOR
+                            continue
+                        if pos + dr_len > len(dir_data):
+                            break
+                        name_len   = dir_data[pos + 32]
+                        raw_name   = dir_data[pos + 33: pos + 33 + name_len]
+                        name       = raw_name.split(b";")[0].upper()
+                        is_dir     = bool(dir_data[pos + 25] & 0x02)
+                        e_sector   = int.from_bytes(dir_data[pos + 2:pos + 6],   "little")
+                        e_size     = int.from_bytes(dir_data[pos + 10:pos + 14], "little")
+                        if name == target:
+                            if i == len(parts) - 1:          # last component → file
+                                return (e_sector * SECTOR, e_size)
+                            elif is_dir:                     # intermediate dir → descend
+                                dir_sector, dir_size = e_sector, e_size
+                                found = True
+                                break
+                        pos += dr_len
+                    if not found and i < len(parts) - 1:
+                        return None  # intermediate directory not found
+        except OSError:
+            return None
+        return None
+
+    @classmethod
+    def _detect_win11_from_iso_direct(cls, iso_path: str) -> bool:
+        """
+        Detect Windows 11 by reading install.wim/esd directly from the ISO
+        without mounting. Parses ISO 9660 directory and WIM header to reach
+        the uncompressed XML metadata section, then searches for "Windows 11".
+        """
+        for wim_rel in ("sources/install.wim", "sources/install.esd"):
+            loc = cls._iso_find_file(iso_path, wim_rel)
+            if loc is None:
+                continue
+            wim_iso_offset, wim_size = loc
+            try:
+                with open(iso_path, "rb") as f:
+                    # Read first 96 bytes of the WIM file (header through XML descriptor)
+                    f.seek(wim_iso_offset)
+                    header = f.read(96)
+                    if len(header) < 96 or header[:8] != b"MSWIM\x00\x00\x00":
+                        continue
+
+                    # WIM XML data resource descriptor starts at header offset 72
+                    # Layout (24 bytes): [size+flags: 8][offset: 8][original_size: 8]
+                    size_flags   = int.from_bytes(header[72:80], "little")
+                    compressed   = size_flags & ((1 << 56) - 1)   # bits 0-55
+                    flags        = (size_flags >> 56) & 0xFF       # bits 56-63
+                    xml_rel_off  = int.from_bytes(header[80:88], "little")
+                    xml_orig_sz  = int.from_bytes(header[88:96], "little")
+
+                    # Only handle uncompressed XML (flags == 0); ESD uses LZMS
+                    if flags != 0 or xml_rel_off == 0 or xml_orig_sz == 0:
+                        continue
+
+                    read_sz = min(xml_orig_sz, compressed, 2 * 1024 * 1024)
+                    f.seek(wim_iso_offset + xml_rel_off)
+                    xml_data = f.read(read_sz)
+
+                    # WIM XML is UTF-16LE; search for "Windows 11"
+                    if "Windows 11".encode("utf-16-le") in xml_data:
+                        return True
+            except OSError:
+                continue
+        return False
 
     @classmethod
     def _set_recommendations(cls, info: IsoInfo):
