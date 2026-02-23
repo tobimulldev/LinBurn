@@ -6,7 +6,7 @@ import os
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QFont
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QComboBox, QLineEdit, QPushButton, QCheckBox,
@@ -518,7 +518,8 @@ class MainWindow(QMainWindow):
             f"ISO: {info.label} | {info.size_str} | "
             f"{tr('lbl_bootable')}: {yes if info.is_bootable else no} | "
             f"UEFI: {yes if info.has_uefi else no} | "
-            f"Windows: {yes if info.is_windows else no}"
+            f"Windows: {yes if info.is_windows else no} | "
+            f"Win11: {yes if info.is_windows11 else no}"
         )
 
         # Apply recommendations
@@ -531,9 +532,17 @@ class MainWindow(QMainWindow):
         if info.label:
             self._edit_label.setText(info.label[:32])
 
-        if info.is_windows11:
+        # Show Win11 bypass panel for any Windows ISO — even if Win11 auto-detection
+        # failed (e.g. Mount-DiskImage refused, DISM unavailable), the user may
+        # know they have a Win11 ISO and want the options.
+        if info.is_windows:
             self._win_group.setVisible(True)
-            self._log(tr("win11_detected_log"))
+            if info.is_windows11:
+                self._win_warning.setText(tr("win_warning"))
+                self._log(tr("win11_detected_log"))
+            else:
+                self._win_warning.setText(tr("win_warning_generic"))
+                self._log(tr("win_detected_log"))
         else:
             self._win_group.setVisible(False)
 
