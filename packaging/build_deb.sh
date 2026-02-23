@@ -6,7 +6,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="1.0.0"
+VERSION="${VERSION:-1.0.0}"
 ARCH="amd64"
 PKG_NAME="linburn"
 PKG_DIR="/tmp/linburn_pkg"

@@ -1,0 +1,68 @@
+name: Build Linux Packages
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ── .deb package (Ubuntu / Debian / Mint) ──────────────────────────────────
+  build-deb:
+    name: Build .deb
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+
+      - name: Set version from tag
+        run: |
+          TAG="${GITHUB_REF_NAME:-1.0.0}"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Build .deb
+        run: bash packaging/build_deb.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LinBurn-deb
+          path: "*.deb"
+          retention-days: 30
+
+      - name: Attach .deb to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "*.deb"
+
+  # ── Flatpak bundle (all Linux distros) ─────────────────────────────────────
+  build-flatpak:
+    name: Build Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: LinBurn.flatpak
+          manifest-path: packaging/flatpak/io.github.linburn.LinBurn.yaml
+          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Attach Flatpak to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LinBurn.flatpak
