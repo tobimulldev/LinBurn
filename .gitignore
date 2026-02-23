@@ -22,6 +22,10 @@ packaging/flatpak/*.whl
 *.deb
 *.flatpak
 *.rpm
+*.exe
+
+# Auto-generated icon (created by build_exe.bat from PNG)
+Assets/icon.ico
 
 # IDE / Editor
 .vscode/

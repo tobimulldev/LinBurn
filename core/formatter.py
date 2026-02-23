@@ -1,10 +1,13 @@
 """
 USB drive partitioning and formatting.
 Supports MBR/GPT partition schemes and FAT32/NTFS/exFAT/ext4 filesystems.
+Linux:   parted + mkfs.*
+Windows: diskpart (via core.platform.windows helpers)
 """
 import os
 import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Optional
@@ -53,7 +56,10 @@ def _run(cmd, timeout=15, capture=False):
     if t.is_alive():
         # Timed out — kill entire process group (best-effort; D-state may survive)
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            if sys.platform != "win32":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
         except (ProcessLookupError, OSError):
             try:
                 proc.kill()
@@ -98,6 +104,11 @@ class Formatter:
         def log(msg):
             if log_callback:
                 log_callback(msg)
+
+        if sys.platform == "win32":
+            return cls._format_device_windows(
+                device_path, scheme, filesystem, label, quick_format, log
+            )
 
         log(f"Lösche bestehende Signaturen auf {device_path}...")
         cls._wipe_device(device_path)
@@ -156,6 +167,9 @@ class Formatter:
         def log(msg):
             if log_callback:
                 log_callback(msg)
+
+        if sys.platform == "win32":
+            return cls._format_device_dual_windows(device_path, label, quick_format, log)
 
         log(f"Lösche bestehende Signaturen auf {device_path}...")
         cls._wipe_device(device_path)
@@ -375,3 +389,62 @@ class Formatter:
             raise FormatterError(
                 f"Formatierung fehlgeschlagen ({filesystem}): {stderr.strip()}"
             )
+
+    # ------------------------------------------------------------------
+    # Windows implementations
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _format_device_windows(
+        cls,
+        device_path: str,
+        scheme: str,
+        filesystem: str,
+        label: str,
+        quick_format: bool,
+        log,
+    ) -> str:
+        """Windows: partition + format via diskpart. Returns drive letter e.g. 'E:'."""
+        from core.platform.windows import get_disk_number, create_single_partition_win
+
+        disk_num = get_disk_number(device_path)
+        if disk_num is None:
+            raise FormatterError(f"Ungültiger Gerätepfad: {device_path}")
+
+        log(f"Formatiere Disk {disk_num} ({scheme}, {filesystem})...")
+        drive_letter = create_single_partition_win(
+            disk_num, scheme, filesystem, label, quick_format
+        )
+        if not drive_letter:
+            raise FormatterError(
+                "Formatierung fehlgeschlagen — kein Laufwerksbuchstabe zugewiesen."
+            )
+
+        log(f"Formatierung abgeschlossen: {drive_letter}")
+        return drive_letter
+
+    @classmethod
+    def _format_device_dual_windows(
+        cls,
+        device_path: str,
+        label: str,
+        quick_format: bool,
+        log,
+    ) -> tuple:
+        """Windows: GPT dual-partition (EFI + NTFS) via diskpart. Returns (efi_letter, data_letter)."""
+        from core.platform.windows import get_disk_number, create_dual_partition_win
+
+        disk_num = get_disk_number(device_path)
+        if disk_num is None:
+            raise FormatterError(f"Ungültiger Gerätepfad: {device_path}")
+
+        log(f"Erstelle GPT Dual-Partition auf Disk {disk_num}...")
+        efi_letter, data_letter = create_dual_partition_win(disk_num, label, quick_format)
+
+        if not efi_letter or not data_letter:
+            raise FormatterError(
+                "Dual-Partition fehlgeschlagen — nicht alle Laufwerksbuchstaben zugewiesen."
+            )
+
+        log(f"Dual-Partition fertig: EFI={efi_letter}, Daten={data_letter}")
+        return efi_letter, data_letter

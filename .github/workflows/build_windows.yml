@@ -1,0 +1,66 @@
+name: Build Windows EXE
+
+on:
+  # Automatically build when a release is published
+  release:
+    types: [published]
+  # Also allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build LinBurn.exe
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller PyQt6 pillow
+
+      - name: Convert icon PNG → ICO
+        run: |
+          python -c "
+          from PIL import Image
+          img = Image.open('Assets/Gemini_Generated_Image_296qmr296qmr296q.png').convert('RGBA')
+          img.save('Assets/icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          print('icon.ico created.')
+          "
+
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller packaging/windows/linburn.spec --noconfirm
+
+      - name: Verify output
+        run: |
+          if (Test-Path "dist/LinBurn.exe") {
+            $size = (Get-Item "dist/LinBurn.exe").Length / 1MB
+            Write-Host "LinBurn.exe built successfully ($([math]::Round($size, 1)) MB)"
+          } else {
+            Write-Error "LinBurn.exe not found!"
+            exit 1
+          }
+        shell: pwsh
+
+      # Upload as artifact (always available for download from the Actions tab)
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LinBurn-Windows
+          path: dist/LinBurn.exe
+          retention-days: 30
+
+      # Attach to release if triggered by a release event
+      - name: Attach EXE to release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LinBurn.exe

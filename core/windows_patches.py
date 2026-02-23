@@ -2,10 +2,13 @@
 Windows 11 compatibility patches for USB installations.
 Bypasses TPM 2.0, Secure Boot, RAM requirements and removes
 mandatory online account (Microsoft Account) requirement.
+Linux:   wimlib-imagex (boot.wim patching)
+Windows: DISM /Mount-Image (boot.wim patching)
 """
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import textwrap
 
@@ -64,6 +67,11 @@ class WindowsPatcher:
         boot_wim = os.path.join(usb_mount, "sources", "boot.wim")
         if not os.path.exists(boot_wim):
             log("Warnung: boot.wim nicht gefunden, überspringe WinPE-Patch.")
+            return
+
+        if sys.platform == "win32":
+            from core.platform.windows import patch_boot_wim_win
+            patch_boot_wim_win(boot_wim, log)
             return
 
         # Create a temporary empty file to use as the stub DLL

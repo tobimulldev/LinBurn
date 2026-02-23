@@ -18,13 +18,39 @@ import sys
 
 
 def check_root():
-    """Ensure the program runs with root privileges."""
+    """Ensure the program runs with administrator / root privileges."""
+    if sys.platform == "win32":
+        _check_admin_windows()
+    else:
+        _check_root_linux()
+
+
+def _check_root_linux():
     if os.geteuid() != 0:
         print("Fehler: LinBurn muss als root (sudo) ausgeführt werden.")
         print("Starte neu mit sudo...")
         args = [sys.executable] + sys.argv
         os.execvp("sudo", ["sudo"] + args)
         sys.exit(1)
+
+
+def _check_admin_windows():
+    import ctypes
+    try:
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        is_admin = False
+
+    if not is_admin:
+        # Re-launch with UAC elevation prompt
+        try:
+            params = " ".join(f'"{a}"' for a in sys.argv)
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, params, None, 1
+            )
+        except Exception as e:
+            print(f"Fehler beim Starten mit Admin-Rechten: {e}")
+        sys.exit(0)
 
 
 def check_dependencies():

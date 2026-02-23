@@ -1,8 +1,11 @@
 """
 ISO image analysis: detects boot capability, UEFI support, Windows version, etc.
+Linux:   mount -o loop,ro + isoinfo fallback
+Windows: PowerShell Mount-DiskImage (via core.platform.windows)
 """
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Optional
@@ -89,6 +92,10 @@ class IsoAnalyzer:
     @classmethod
     def _check_contents(cls, path: str, info: IsoInfo):
         """Mount ISO and inspect directory structure."""
+        if sys.platform == "win32":
+            cls._check_contents_windows(path, info)
+            return
+
         mount_point = tempfile.mkdtemp(prefix="linburn_iso_")
         mounted = False
         try:
@@ -157,6 +164,31 @@ class IsoAnalyzer:
                 info.is_bootable = True
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+
+    @classmethod
+    def _check_contents_windows(cls, path: str, info: IsoInfo):
+        """Windows: mount ISO via Mount-DiskImage and inspect contents."""
+        from core.platform.windows import inspect_iso_contents_win, unmount_iso_win
+        try:
+            result = inspect_iso_contents_win(path)
+            mount_letter = result.get("mount_letter")
+
+            if result.get("has_efi"):
+                info.has_uefi = True
+                info.is_bootable = True
+            if result.get("has_isolinux"):
+                info.has_bios_boot = True
+                info.is_bootable = True
+            if result.get("is_windows"):
+                info.is_windows = True
+                info.is_bootable = True
+                if mount_letter:
+                    info.is_windows11 = cls._is_windows11(mount_letter)
+        finally:
+            try:
+                unmount_iso_win(path)
+            except Exception:
+                pass
 
     @classmethod
     def _is_windows11(cls, mount_point: str) -> bool:

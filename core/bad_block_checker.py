@@ -1,9 +1,12 @@
 """
-Bad block checking for USB drives using the `badblocks` utility.
+Bad block checking for USB drives.
+Linux:   badblocks utility
+Windows: chkdsk /R (via core.platform.windows)
 Runs as a QThread to avoid blocking the UI.
 """
 import re
 import subprocess
+import sys
 from PyQt6.QtCore import QThread, pyqtSignal
 
 
@@ -42,6 +45,10 @@ class BadBlockChecker(QThread):
         self._abort = False
         mode = "Schreibtest (destruktiv)" if self.destructive else "Lesetest (nicht-destruktiv)"
         self.log.emit(f"Starte Bad-Block-Prüfung [{mode}] auf {self.device_path}...")
+
+        if sys.platform == "win32":
+            self._run_windows()
+            return
 
         cmd = ["badblocks", "-b", str(self.block_size), "-s", "-v"]
         if self.destructive:
@@ -118,3 +125,33 @@ class BadBlockChecker(QThread):
         self._abort = True
         if self._process and self._process.poll() is None:
             self._process.terminate()
+
+    def _run_windows(self):
+        """Windows: use chkdsk /R via check_bad_blocks_win."""
+        from core.platform.windows import get_disk_number, get_disk_drive_letters, check_bad_blocks_win
+
+        disk_num = get_disk_number(self.device_path)
+        if disk_num is None:
+            self.error.emit(f"Ungültiger Gerätepfad: {self.device_path}")
+            return
+
+        letters = get_disk_drive_letters(disk_num)
+        if not letters:
+            self.error.emit(
+                "Kein Laufwerksbuchstabe für dieses Gerät gefunden. "
+                "Bitte zuerst formatieren, damit chkdsk ausgeführt werden kann."
+            )
+            return
+
+        drive_letter = letters[0]
+        bad_count = check_bad_blocks_win(
+            drive_letter=drive_letter,
+            log_callback=self.log.emit,
+            progress_callback=self.progress.emit,
+        )
+        self.progress.emit(100)
+        if bad_count == 0:
+            self.log.emit("Keine schlechten Sektoren gefunden (chkdsk).")
+        else:
+            self.log.emit(f"chkdsk: {bad_count} fehlerhafte Sektoren gefunden.")
+        self.finished_ok.emit(bad_count)

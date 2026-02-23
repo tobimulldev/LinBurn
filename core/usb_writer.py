@@ -2,15 +2,17 @@
 USB writing engine.
 Handles DD mode (direct image write) and ISO mode (partition + format + copy + bootloader).
 Runs as a QThread to keep the UI responsive.
+Linux:   dd, mount/umount, wimlib-imagex, sync
+Windows: Python raw I/O, Mount-DiskImage, DISM, os.fsync
 """
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from PyQt6.QtCore import QThread, pyqtSignal
 
@@ -106,6 +108,10 @@ class UsbWriter(QThread):
         self._log(f"ISO-Größe: {self._fmt_size(iso_size)}")
         self._status("Schreibe Image...")
 
+        if sys.platform == "win32":
+            self._run_dd_windows(cfg.iso_path, cfg.device_path)
+            return
+
         cmd = [
             "dd",
             f"if={cfg.iso_path}",
@@ -157,6 +163,30 @@ class UsbWriter(QThread):
         self._status("Synchronisiere...")
         subprocess.run(["sync"], check=False)
 
+    def _run_dd_windows(self, iso_path: str, device_path: str):
+        """Windows DD mode: raw write via Python I/O using dd_write_win."""
+        from core.platform.windows import dd_write_win
+
+        def _progress(written, total):
+            if total > 0:
+                pct = min(99, int(written / total * 100))
+                self.progress.emit(pct)
+                self._status(
+                    f"Schreibe... {self._fmt_size(written)}/{self._fmt_size(total)}"
+                )
+
+        try:
+            dd_write_win(
+                iso_path=iso_path,
+                device_path=device_path,
+                progress_callback=_progress,
+                abort_check=lambda: self._abort,
+            )
+        except OSError as e:
+            raise RuntimeError(f"Schreibfehler (DD): {e}")
+
+        self._log("DD-Schreibvorgang abgeschlossen.")
+
     # ------------------------------------------------------------------
     # ISO Mode
     # ------------------------------------------------------------------
@@ -182,6 +212,10 @@ class UsbWriter(QThread):
         self._status(name + "...")
 
     def _run_iso(self):
+        if sys.platform == "win32":
+            self._run_iso_windows()
+            return
+
         cfg = self.config
         iso_mount = None
         usb_mount = None
@@ -331,6 +365,142 @@ class UsbWriter(QThread):
 
         self._log("ISO-Modus abgeschlossen.")
 
+    def _run_iso_windows(self):
+        """Windows ISO mode: Mount-DiskImage + diskpart + file copy + DISM."""
+        from core.platform.windows import mount_iso_win, unmount_iso_win
+
+        cfg = self.config
+        iso_letter = None
+
+        try:
+            # Step 1: Unmount
+            self._step(0)
+            self._log(f"Unmounte alle Partitionen von {cfg.device_path}...")
+            DeviceManager.unmount_device(cfg.device_path)
+            if self._abort:
+                return
+
+            # Step 3: Mount ISO
+            self._step(2)
+            self._log(f"Mounte ISO: {cfg.iso_path}")
+            iso_letter = mount_iso_win(cfg.iso_path)
+            if not iso_letter:
+                raise RuntimeError("ISO mounten fehlgeschlagen (Mount-DiskImage).")
+            self._log(f"ISO gemountet: {iso_letter}")
+
+            # Detect Windows ISO
+            install_wim = os.path.join(iso_letter, "sources", "install.wim")
+            install_esd = os.path.join(iso_letter, "sources", "install.esd")
+            is_windows = os.path.exists(install_wim) or os.path.exists(install_esd)
+
+            effective_fs = "FAT32" if is_windows else cfg.filesystem
+            if is_windows and cfg.filesystem != "FAT32":
+                self._log("Windows-ISO erkannt: Verwende FAT32 (install.wim wird ggf. gesplittet).")
+
+            # Step 2: Partition + Format → returns drive letter e.g. "F:"
+            self._step(1)
+            try:
+                drive_letter = Formatter.format_device(
+                    device_path=cfg.device_path,
+                    scheme=cfg.scheme,
+                    filesystem=effective_fs,
+                    label=cfg.label,
+                    cluster_size=cfg.cluster_size,
+                    quick_format=cfg.quick_format,
+                    log_callback=self._log,
+                )
+            except FormatterError as e:
+                raise RuntimeError(f"Formatierung fehlgeschlagen: {e}")
+
+            if self._abort:
+                return
+
+            # USB mount point is the drive letter with backslash (e.g. "F:\")
+            usb_mount = drive_letter + "\\"
+
+            # Step 4: (no separate mount needed on Windows — drive letter is the mount)
+            self._step(3)
+            self._log(f"USB-Laufwerk bereit: {usb_mount}")
+
+            if self._abort:
+                return
+
+            # Step 5: Copy ISO contents
+            self._step(4)
+            skip_for_split: set = set()
+            if is_windows:
+                for name in ("install.wim", "install.esd"):
+                    src_wim = os.path.join(iso_letter, "sources", name)
+                    if os.path.exists(src_wim) and os.path.getsize(src_wim) > self._FAT32_MAX:
+                        skip_for_split.add(name)
+                        self._log(
+                            f"{name} ({self._fmt_size(os.path.getsize(src_wim))}) > 4 GiB"
+                            " — wird separat gesplittet."
+                        )
+
+            self._copy_iso_contents(iso_letter, usb_mount, skip_in_sources=skip_for_split)
+
+            for name in skip_for_split:
+                if self._abort:
+                    return
+                src_wim = os.path.join(iso_letter, "sources", name)
+                dst_swm = os.path.join(
+                    usb_mount, "sources",
+                    name.replace(".wim", ".swm").replace(".esd", ".swm"),
+                )
+                self._split_wim(src_wim, dst_swm)
+
+            if self._abort:
+                return
+
+            # Step 6: Windows patches
+            if cfg.win_bypass_tpm or cfg.win_bypass_secureboot or cfg.win_bypass_ram or cfg.win_remove_online:
+                self._step(5)
+                WindowsPatcher.apply(
+                    usb_mount=usb_mount,
+                    bypass_tpm=cfg.win_bypass_tpm,
+                    bypass_secureboot=cfg.win_bypass_secureboot,
+                    bypass_ram=cfg.win_bypass_ram,
+                    remove_online_requirement=cfg.win_remove_online,
+                    log_callback=self._log,
+                )
+
+            if self._abort:
+                return
+
+            # Step 7: Bootloader
+            self._step(6)
+            try:
+                BootloaderInstaller.install_from_iso(
+                    device_path=cfg.device_path,
+                    partition_path=drive_letter,
+                    mount_point=usb_mount,
+                    iso_mount=iso_letter,
+                    target_system=cfg.target_system,
+                    log_callback=self._log,
+                )
+            except BootloaderError as e:
+                self._log(f"Warnung: Bootloader-Fehler (möglicherweise nicht bootbar): {e}")
+
+            # Step 8: Sync (fsync on the drive)
+            self._step(7)
+            self._status("Synchronisiere...")
+            try:
+                with open(drive_letter + "\\.", "rb") as fh:
+                    os.fsync(fh.fileno())
+            except OSError:
+                pass  # Best-effort on Windows
+
+        finally:
+            if iso_letter:
+                try:
+                    unmount_iso_win(cfg.iso_path)
+                    self._log("ISO ausgehängt.")
+                except Exception:
+                    pass
+
+        self._log("ISO-Modus (Windows) abgeschlossen.")
+
     # FAT32 max file size is just under 4 GiB
     _FAT32_MAX = 4 * 1024 ** 3 - 1
 
@@ -338,6 +508,16 @@ class UsbWriter(QThread):
         """Split a WIM/ESD file from src directly into dst_swm chunks (≤3800 MiB each)."""
         self._log(f"Splitte {os.path.basename(src_wim)} → {os.path.basename(dst_swm)} ...")
         self._status("Splitte install.wim (kann Minuten dauern)...")
+
+        if sys.platform == "win32":
+            from core.platform.windows import split_wim_win
+            ok = split_wim_win(src_wim, dst_swm, max_size_mb=3800)
+            if ok:
+                self._log("install.wim erfolgreich gesplittet (DISM).")
+            else:
+                self._log("Warnung: DISM-Split fehlgeschlagen — Install-Image möglicherweise zu groß für FAT32.")
+            return
+
         result = subprocess.run(
             ["wimlib-imagex", "split", src_wim, dst_swm, "3800"],
             capture_output=True, text=True, timeout=1200,
@@ -465,7 +645,8 @@ class UsbWriter(QThread):
         except FormatterError as e:
             raise RuntimeError(str(e))
 
-        subprocess.run(["sync"], check=False)
+        if sys.platform != "win32":
+            subprocess.run(["sync"], check=False)
         self._log("Formatierung abgeschlossen.")
 
     # ------------------------------------------------------------------

@@ -1,10 +1,12 @@
 """
 Bootloader installation for USB drives.
-Supports Syslinux (BIOS/MBR) and GRUB-EFI (UEFI).
+Linux:   Syslinux (BIOS/MBR) + GRUB-EFI (UEFI)
+Windows: bootsect.exe (BIOS) + EFI files copied from ISO (UEFI)
 """
 import os
 import shutil
 import subprocess
+import sys
 import glob as _glob
 from typing import Optional
 
@@ -85,6 +87,19 @@ class BootloaderInstaller:
         if is_windows:
             log("Windows-ISO erkannt: Verwende eingebetteten Bootloader (bootmgr/EFI).")
             # EFI dir already copied during file copy step; nothing extra needed
+            return
+
+        if sys.platform == "win32":
+            # Linux ISO on Windows: copy EFI dir + try bootsect for BIOS
+            iso_efi = os.path.join(iso_mount, "EFI")
+            if os.path.isdir(iso_efi) and target_system in ("UEFI", "BIOS+UEFI"):
+                dest_efi = os.path.join(mount_point, "EFI")
+                if not os.path.exists(dest_efi):
+                    log("Kopiere EFI-Bootloader aus ISO...")
+                    shutil.copytree(iso_efi, dest_efi)
+            if target_system in ("BIOS", "BIOS+UEFI"):
+                from core.platform.windows import install_bios_bootloader_win
+                install_bios_bootloader_win(partition_path, log)
             return
 
         # Copy EFI directory from ISO if present
